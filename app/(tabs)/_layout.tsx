@@ -4,7 +4,6 @@ import {
   Chrome as Home,
   Users,
   UtensilsCrossed,
-  Award,
   User,
 } from 'lucide-react-native';
 import Colors from '@/constants/Colors';
@@ -23,16 +22,25 @@ export default function TabLayout() {
         tabBarStyle: {
           backgroundColor: colors.background,
           borderTopColor: colors.border,
-          paddingBottom: 6,
-          paddingTop: 4,
-          height: 60,
+          paddingBottom: 60,           // Super bottom padding!
+          paddingTop: 18,              // Extra top padding
+          height: 110,                 // Makes room for the extra padding
+          borderTopLeftRadius: 28,
+          borderTopRightRadius: 28,
+          marginBottom: 16,            // Looks very "floaty" above bottom
+          elevation: 20,
+          shadowColor: "#000",
+          shadowOpacity: 0.16,
+          shadowRadius: 18,
         },
         tabBarLabelStyle: {
           fontFamily: FONTS.body,
-          fontSize: FONT_SIZES.xs,
+          fontSize: FONT_SIZES.sm,
+          paddingBottom: 6,
         },
         tabBarShowLabel: true,
         headerShown: false,
+        safeAreaInsets: { bottom: 0, top: 0 }, // Avoid double safe area
       }}
     >
       <Tabs.Screen

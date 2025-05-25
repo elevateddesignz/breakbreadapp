@@ -1,23 +1,19 @@
 import React, { useEffect, useState } from 'react';
 import {
-  StyleSheet,
-  View,
-  TouchableOpacity,
-  Image,
-  ScrollView,
-  ActivityIndicator,
-  TextInput,
-  KeyboardAvoidingView,
-  Platform,
-  Alert,
+  StyleSheet, View, TouchableOpacity, ScrollView, Image, ActivityIndicator, Alert, Modal, TextInput,
 } from 'react-native';
+import { useRouter } from 'expo-router';
 import { Text } from '@/components/ui/Text';
 import { Card } from '@/components/ui/Card';
 import { SPACING, RADIUS } from '@/constants/Theme';
 import Colors from '@/constants/Colors';
 import useColorScheme from '@/hooks/useColorScheme';
-import { Plus, Clock, Trash, LogOut } from 'lucide-react-native';
+import {
+  Plus, Clock, Trash, LogOut, Edit3 as EditIcon, Users as UsersIcon, Image as ImageIcon,
+} from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
+import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
 
 type TableRow = {
   id: string;
@@ -26,7 +22,8 @@ type TableRow = {
   created_at: string;
   creator_id: string;
   lastorder?: string;
-  image?: string;
+  image?: string | null;
+  image_filename?: string | null;
 };
 
 function generateInviteCode(length = 6) {
@@ -38,11 +35,48 @@ function generateInviteCode(length = 6) {
   return code;
 }
 
+async function uploadImage(imageUri: string, userId: string): Promise<{ publicUrl: string; fileName: string }> {
+  const ext = imageUri.split('.').pop() || 'jpg';
+  const fileName = `banner_${userId}_${Date.now()}.${ext}`;
+  let contentType = 'image/jpeg';
+  if (imageUri.toLowerCase().endsWith('.png')) contentType = 'image/png';
+  if (imageUri.toLowerCase().endsWith('.webp')) contentType = 'image/webp';
+
+  const { data, error } = await supabase.storage.from('tables').createSignedUploadUrl(fileName);
+  if (error) throw new Error(error.message);
+
+  const uploadRes = await FileSystem.uploadAsync(data.signedUrl, imageUri, {
+    httpMethod: 'PUT',
+    headers: { 'Content-Type': contentType },
+    uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+  });
+
+  if (uploadRes.status !== 200) throw new Error('Failed to upload image. Try again.');
+
+  const { data: urlData } = supabase.storage.from('tables').getPublicUrl(fileName);
+  return { publicUrl: urlData?.publicUrl, fileName };
+}
+
+async function removeImageFromStorage(fileName: string) {
+  if (!fileName) return;
+  try {
+    await supabase.storage.from('tables').remove([fileName]);
+  } catch (err) {
+    console.warn('Error deleting image:', err);
+  }
+}
+
+function getTableImageUrl(table: TableRow) {
+  return table.image && table.image.startsWith('http')
+    ? table.image
+    : 'https://nbglrvsdimjtyibjwjgf.supabase.co/storage/v1/object/public/tables/ChatGPT%20Image%20May%2023,%202025,%2010_51_20%20PM.png';
+}
+
 export default function GroupsScreen() {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme];
+  const router = useRouter();
 
-  // Auth state and loading state for user
   const [userId, setUserId] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
@@ -58,35 +92,68 @@ export default function GroupsScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Modal for creating table
+  // Modal states for Create
   const [modalVisible, setModalVisible] = useState(false);
   const [newTableName, setNewTableName] = useState('');
+  const [bannerImage, setBannerImage] = useState<string | null>(null);
+  const [bannerUploading, setBannerUploading] = useState(false);
 
-  // Fetch tables on mount
+  // Modal states for Edit
+  const [editModalVisible, setEditModalVisible] = useState(false);
+  const [editTableId, setEditTableId] = useState<string | null>(null);
+  const [editTableName, setEditTableName] = useState('');
+  const [editBannerImage, setEditBannerImage] = useState<string | null>(null);
+  const [editBannerUploading, setEditBannerUploading] = useState(false);
+  const [editTableOldFilename, setEditTableOldFilename] = useState<string | null>(null);
+
+  async function fetchTables() {
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('tables')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      setTables(data || []);
+    } catch (e: any) {
+      setError(e.message || 'Could not load tables.');
+    }
+    setLoading(false);
+  }
+
   useEffect(() => {
-    (async () => {
-      try {
-        const { data, error } = await supabase
-          .from('tables')
-          .select('*')
-          .order('created_at', { ascending: false });
-        if (error) throw error;
-        setTables(data || []);
-      } catch (e: any) {
-        setError(e.message || 'Could not load tables.');
-      }
-      setLoading(false);
-    })();
+    fetchTables();
   }, []);
 
-  // Open modal
   const openCreateTableModal = () => {
     setNewTableName('');
+    setBannerImage(null);
     setError(null);
+    setBannerUploading(false);
     setModalVisible(true);
   };
 
-  // Add new table row (with creator_id)
+  const handlePickBanner = async (setter: (val: string) => void) => {
+    try {
+      const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permissionResult.granted) {
+        Alert.alert('Permission required', 'Please grant access to photos.');
+        return;
+      }
+      const pickerResult = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [3, 1],
+        quality: 0.9,
+        base64: false,
+      });
+      if (pickerResult.canceled || !pickerResult.assets?.length) return;
+      setter(pickerResult.assets[0].uri);
+    } catch (err) {
+      Alert.alert('Image picker error', String(err));
+    }
+  };
+
   const handleCreateTable = async () => {
     if (!newTableName.trim()) {
       setError('Table name cannot be empty.');
@@ -98,28 +165,118 @@ export default function GroupsScreen() {
     }
     setLoading(true);
     setError(null);
+
+    let imageUrl: string | undefined = undefined;
+    let imageFilename: string | undefined = undefined;
+    if (bannerImage) {
+      try {
+        setBannerUploading(true);
+        const { publicUrl, fileName } = await uploadImage(bannerImage, userId);
+        imageUrl = publicUrl;
+        imageFilename = fileName;
+      } catch (err: any) {
+        setError(err.message || 'Banner upload failed.');
+        setBannerUploading(false);
+        setLoading(false);
+        return;
+      }
+      setBannerUploading(false);
+    } else {
+      // Set default image if none uploaded
+      imageUrl = 'https://nbglrvsdimjtyibjwjgf.supabase.co/storage/v1/object/public/tables/ChatGPT%20Image%20May%2023,%202025,%2010_51_20%20PM.png';
+      imageFilename = null;
+    }
+
     const newTable = {
       name: newTableName.trim(),
       invite_code: generateInviteCode(),
-      image: 'https://via.placeholder.com/600x120.png?text=Table+Image',
+      image: imageUrl ?? null,
+      image_filename: imageFilename ?? null,
       lastorder: null,
       creator_id: userId,
     };
-    const { data, error } = await supabase
-      .from('tables')
-      .insert([newTable])
-      .select('*');
+
+    const { error } = await supabase.from('tables').insert([newTable]);
     if (error) {
       setError(error.message || 'Could not create table.');
-    } else if (data && data.length > 0) {
-      setTables((prev) => [data[0], ...prev]);
+    } else {
+      await fetchTables();
       setModalVisible(false);
     }
     setLoading(false);
   };
 
-  // Delete table (only for creator)
-  const handleDeleteTable = async (tableId: string) => {
+  const openEditTableModal = (table: TableRow) => {
+    setEditTableId(table.id);
+    setEditTableName(table.name);
+    setEditBannerImage(table.image || null);
+    setEditTableOldFilename(table.image_filename || null);
+    setEditModalVisible(true);
+    setError(null);
+    setEditBannerUploading(false);
+  };
+
+  const handleEditTable = async () => {
+    if (!editTableName.trim()) {
+      setError('Table name cannot be empty.');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+
+    let imageUrl: string | undefined = editBannerImage || undefined;
+    let imageFilename: string | undefined = editTableOldFilename || undefined;
+    let newFileName: string | undefined = undefined;
+    let uploaded = false;
+
+    if (editBannerImage && editBannerImage.startsWith('file://')) {
+      try {
+        setEditBannerUploading(true);
+        const { publicUrl, fileName } = await uploadImage(editBannerImage, userId!);
+        imageUrl = publicUrl;
+        imageFilename = fileName;
+        newFileName = fileName;
+        uploaded = true;
+      } catch (err: any) {
+        setError(err.message || 'Banner upload failed.');
+        setEditBannerUploading(false);
+        setLoading(false);
+        return;
+      }
+      setEditBannerUploading(false);
+    }
+
+    // If user removed banner, set default image
+    if (!editBannerImage) {
+      imageUrl = 'https://nbglrvsdimjtyibjwjgf.supabase.co/storage/v1/object/public/tables/ChatGPT%20Image%20May%2023,%202025,%2010_51_20%20PM.png';
+      imageFilename = null;
+    }
+
+    const { error } = await supabase
+      .from('tables')
+      .update({ name: editTableName.trim(), image: imageUrl, image_filename: imageFilename })
+      .eq('id', editTableId);
+
+    if (error) {
+      setError(error.message || 'Could not update table.');
+      setLoading(false);
+      return;
+    }
+
+    if (
+      uploaded &&
+      editTableOldFilename &&
+      editTableOldFilename !== newFileName
+    ) {
+      await removeImageFromStorage(editTableOldFilename);
+    }
+
+    await fetchTables();
+    setEditModalVisible(false);
+    setLoading(false);
+  };
+
+  const handleDeleteTable = async (tableId: string, imageFilename?: string | null) => {
     Alert.alert(
       'Delete Table',
       'Are you sure you want to delete this table?',
@@ -129,8 +286,9 @@ export default function GroupsScreen() {
           text: 'Delete', style: 'destructive', onPress: async () => {
             setLoading(true);
             const { error } = await supabase.from('tables').delete().eq('id', tableId);
-            if (!error) {
-              setTables((prev) => prev.filter((t) => t.id !== tableId));
+            if (!error && imageFilename) {
+              await removeImageFromStorage(imageFilename);
+              await fetchTables();
             }
             setLoading(false);
           }
@@ -139,7 +297,6 @@ export default function GroupsScreen() {
     );
   };
 
-  // Leave table (assumes table_members exists)
   const handleLeaveTable = async (tableId: string) => {
     setLoading(true);
     if (!userId) {
@@ -152,71 +309,129 @@ export default function GroupsScreen() {
       .delete()
       .match({ table_id: tableId, user_id: userId });
     if (!error) {
-      setTables((prev) => prev.filter((t) => t.id !== tableId));
+      await fetchTables();
     }
     setLoading(false);
   };
 
-  // Placeholder handlers
-  const handleCreateOrder = (tableId: string) => {};
-  const handleViewTable = (tableId: string) => {};
-
+  // --- Render UI
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      {/* Modal for New Table */}
-      {modalVisible && (
-        <View style={[styles.modalOverlay, { backgroundColor: colors.modalOverlay || 'rgba(0,0,0,0.7)' }]}>
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-            style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}
-          >
-            <View style={[
-              styles.modalContent,
-              {
-                backgroundColor: colors.card,
-                borderColor: colors.border
-              }
-            ]}>
-              <Text variant="h4" weight="bold" style={{ marginBottom: 16, color: colors.text }}>New Table</Text>
-              <Text variant="body" style={{ marginBottom: 8, color: colors.text }}>Enter table name:</Text>
-              <View style={styles.inputWrapper}>
-                <TextInput
-                  style={[
-                    styles.input,
-                    {
-                      color: colors.text,
-                      borderColor: colors.border,
-                      backgroundColor: colors.inputBackground || colors.background,
-                    }
-                  ]}
-                  value={newTableName}
-                  onChangeText={setNewTableName}
-                  placeholder="e.g., Pizza Crew"
-                  placeholderTextColor={colors.muted}
-                  autoFocus
-                />
-              </View>
-              {error && <Text color={colors.error || 'red'} style={{ marginBottom: 8 }}>{error}</Text>}
-              <View style={{ flexDirection: 'row', gap: 16 }}>
-                <TouchableOpacity
-                  style={[styles.groupButton, { backgroundColor: colors.card, borderColor: colors.border, borderWidth: 1, flex: 1 }]}
-                  onPress={() => setModalVisible(false)}
-                >
-                  <Text variant="body-sm" weight="medium" color={colors.tint}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.groupButton, { backgroundColor: colors.tint, flex: 1 }]}
-                  onPress={handleCreateTable}
-                  disabled={!userId || authLoading}
-                >
-                  <Text variant="body-sm" weight="medium" color={colors.card}>Create</Text>
-                </TouchableOpacity>
+
+      {/* ---------- CREATE TABLE MODAL ---------- */}
+      <Modal
+        visible={modalVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: colors.card }]}>
+            <Text style={{ fontWeight: 'bold', fontSize: 20, marginBottom: 14, color: colors.text }}>Create Table</Text>
+            <View style={styles.inputWrapper}>
+              <TextInput
+                style={[styles.input, { color: colors.text, borderColor: colors.border }]}
+                placeholder="Table name"
+                placeholderTextColor={colors.muted}
+                value={newTableName}
+                onChangeText={setNewTableName}
+                autoFocus
+              />
+            </View>
+            <View style={{ alignItems: 'center' }}>
+              <TouchableOpacity
+                style={styles.bannerUploadButton}
+                onPress={() => handlePickBanner(setBannerImage)}
+              >
+                <ImageIcon size={20} color={colors.tint} />
+                <Text style={{ color: colors.tint, marginLeft: 6 }}>Pick Banner</Text>
+              </TouchableOpacity>
+              <View style={{ minHeight: 80, marginVertical: 8 }}>
+                {bannerImage ? (
+                  <Image source={{ uri: bannerImage }} style={{ width: 160, height: 80, borderRadius: 8 }} />
+                ) : (
+                  <Image source={{ uri: 'https://nbglrvsdimjtyibjwjgf.supabase.co/storage/v1/object/public/tables/ChatGPT%20Image%20May%2023,%202025,%2010_51_20%20PM.png' }} style={{ width: 160, height: 80, borderRadius: 8, opacity: 0.7 }} />
+                )}
               </View>
             </View>
-          </KeyboardAvoidingView>
+            <View style={{ flexDirection: 'row', marginTop: 10 }}>
+              <TouchableOpacity
+                style={[styles.groupButton, { backgroundColor: colors.tint, flex: 1, marginRight: 8 }]}
+                onPress={handleCreateTable}
+                disabled={loading || bannerUploading}
+              >
+                {bannerUploading ? <ActivityIndicator color="#fff" /> : <Text style={{ color: '#fff', fontWeight: 'bold' }}>Create</Text>}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.groupButton, { backgroundColor: colors.error, flex: 1, marginLeft: 8 }]}
+                onPress={() => setModalVisible(false)}
+                disabled={loading}
+              >
+                <Text style={{ color: '#fff', fontWeight: 'bold' }}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+            {error ? <Text style={{ color: colors.error, marginTop: 12 }}>{error}</Text> : null}
+          </View>
         </View>
-      )}
+      </Modal>
 
+      {/* ---------- EDIT TABLE MODAL ---------- */}
+      <Modal
+        visible={editModalVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setEditModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: colors.card }]}>
+            <Text style={{ fontWeight: 'bold', fontSize: 20, marginBottom: 14, color: colors.text }}>Edit Table</Text>
+            <View style={styles.inputWrapper}>
+              <TextInput
+                style={[styles.input, { color: colors.text, borderColor: colors.border }]}
+                placeholder="Table name"
+                placeholderTextColor={colors.muted}
+                value={editTableName}
+                onChangeText={setEditTableName}
+              />
+            </View>
+            <View style={{ alignItems: 'center' }}>
+              <TouchableOpacity
+                style={styles.bannerUploadButton}
+                onPress={() => handlePickBanner(setEditBannerImage)}
+              >
+                <ImageIcon size={20} color={colors.tint} />
+                <Text style={{ color: colors.tint, marginLeft: 6 }}>Pick Banner</Text>
+              </TouchableOpacity>
+              <View style={{ minHeight: 80, marginVertical: 8 }}>
+                {editBannerImage ? (
+                  <Image source={{ uri: editBannerImage }} style={{ width: 160, height: 80, borderRadius: 8 }} />
+                ) : (
+                  <Image source={{ uri: 'https://nbglrvsdimjtyibjwjgf.supabase.co/storage/v1/object/public/tables/ChatGPT%20Image%20May%2023,%202025,%2010_51_20%20PM.png' }} style={{ width: 160, height: 80, borderRadius: 8, opacity: 0.7 }} />
+                )}
+              </View>
+            </View>
+            <View style={{ flexDirection: 'row', marginTop: 10 }}>
+              <TouchableOpacity
+                style={[styles.groupButton, { backgroundColor: colors.tint, flex: 1, marginRight: 8 }]}
+                onPress={handleEditTable}
+                disabled={loading || editBannerUploading}
+              >
+                {editBannerUploading ? <ActivityIndicator color="#fff" /> : <Text style={{ color: '#fff', fontWeight: 'bold' }}>Save</Text>}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.groupButton, { backgroundColor: colors.error, flex: 1, marginLeft: 8 }]}
+                onPress={() => setEditModalVisible(false)}
+                disabled={loading}
+              >
+                <Text style={{ color: '#fff', fontWeight: 'bold' }}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+            {error ? <Text style={{ color: colors.error, marginTop: 12 }}>{error}</Text> : null}
+          </View>
+        </View>
+      </Modal>
+
+      {/* -------- MAIN PAGE -------- */}
       <View style={styles.header}>
         <Text variant="h3" weight="bold" style={{ color: colors.text }}>
           Your Tables
@@ -240,7 +455,7 @@ export default function GroupsScreen() {
           </View>
         ) : error ? (
           <View style={{ padding: SPACING.xl }}>
-            <Text color={colors.error || 'red'} align="center">{error}</Text>
+            <Text color={colors.error} align="center">{error}</Text>
           </View>
         ) : tables.length === 0 ? (
           <Card style={{ alignItems: 'center', marginBottom: SPACING.lg, backgroundColor: colors.card }}>
@@ -252,14 +467,13 @@ export default function GroupsScreen() {
               key={table.id}
               activeOpacity={0.9}
               style={styles.touchable}
-              onPress={() => handleViewTable(table.id)}
             >
               <Card padding={false} style={[styles.groupCard, { backgroundColor: colors.card }]}>
                 <Image
                   source={{
-                    uri: table.image || 'https://via.placeholder.com/600x120.png?text=Table',
+                    uri: getTableImageUrl(table)
                   }}
-                  style={styles.groupImage}
+                  style={styles.bannerPreview}
                   resizeMode="cover"
                 />
                 <View style={styles.groupContent}>
@@ -290,56 +504,67 @@ export default function GroupsScreen() {
                     </Text>
                   </View>
                   <View style={[styles.buttonRow, { marginTop: 12 }]}>
+                    {/* ---- VIEW TABLE BUTTON ---- */}
                     <TouchableOpacity
                       style={[
                         styles.groupButton,
-                        { backgroundColor: colors.tint },
+                        { backgroundColor: colors.tint, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }
                       ]}
-                      onPress={() => handleCreateOrder(table.id)}
+                      onPress={() => router.push(`/tables/${table.id}/TableDetailsScreen`)}
                     >
-                      <Text variant="body-sm" weight="medium" color={colors.card}>
-                        Create Order
-                      </Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[
-                        styles.groupButton,
-                        styles.secondaryButton,
-                        { backgroundColor: colors.primaryLight },
-                      ]}
-                      onPress={() => handleViewTable(table.id)}
-                    >
+                      <UsersIcon size={16} color="#fff" />
                       <Text
                         variant="body-sm"
                         weight="medium"
-                        color={colors.tint}
+                        color="#fff"
+                        style={{ marginLeft: 4 }}
                       >
                         View Table
                       </Text>
                     </TouchableOpacity>
+                    {/* ---- END VIEW TABLE BUTTON ---- */}
                     {table.creator_id === userId ? (
-                      <TouchableOpacity
-                        style={[
-                          styles.groupButton,
-                          { backgroundColor: colors.error || '#e74c3c', flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
-                        ]}
-                        onPress={() => handleDeleteTable(table.id)}
-                      >
-                        <Trash size={18} color="#fff" />
-                        <Text
-                          variant="body-sm"
-                          weight="medium"
-                          color="#fff"
-                          style={{ marginLeft: 4 }}
+                      <>
+                        <TouchableOpacity
+                          style={[
+                            styles.groupButton,
+                            { backgroundColor: colors.warning, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
+                          ]}
+                          onPress={() => openEditTableModal(table)}
                         >
-                          Delete
-                        </Text>
-                      </TouchableOpacity>
+                          <EditIcon size={18} color="#fff" />
+                          <Text
+                            variant="body-sm"
+                            weight="medium"
+                            color="#fff"
+                            style={{ marginLeft: 4 }}
+                          >
+                            Edit
+                          </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[
+                            styles.groupButton,
+                            { backgroundColor: colors.error, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
+                          ]}
+                          onPress={() => handleDeleteTable(table.id, table.image_filename)}
+                        >
+                          <Trash size={18} color="#fff" />
+                          <Text
+                            variant="body-sm"
+                            weight="medium"
+                            color="#fff"
+                            style={{ marginLeft: 4 }}
+                          >
+                            Delete
+                          </Text>
+                        </TouchableOpacity>
+                      </>
                     ) : (
                       <TouchableOpacity
                         style={[
                           styles.groupButton,
-                          { backgroundColor: colors.warning || '#f39c12', flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
+                          { backgroundColor: colors.warning, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
                         ]}
                         onPress={() => handleLeaveTable(table.id)}
                       >
@@ -409,9 +634,11 @@ const styles = StyleSheet.create({
     marginBottom: SPACING.md,
     overflow: 'hidden',
   },
-  groupImage: {
+  bannerPreview: {
     width: '100%',
-    height: 120,
+    aspectRatio: 1,
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
     backgroundColor: '#eee',
   },
   groupContent: {
@@ -430,6 +657,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginTop: SPACING.xs,
     gap: 12,
+    flexWrap: 'wrap',
   },
   groupButton: {
     flex: 0.48,
@@ -437,6 +665,8 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS.md,
     alignItems: 'center',
     justifyContent: 'center',
+    minWidth: 100,
+    marginBottom: 6,
   },
   secondaryButton: {
     backgroundColor: 'transparent',
@@ -459,7 +689,16 @@ const styles = StyleSheet.create({
   touchable: {
     width: '100%',
   },
-  // MODAL STYLES BELOW
+  bannerUploadButton: {
+    marginTop: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    backgroundColor: '#f1f5fb',
+    borderRadius: 8,
+    alignSelf: 'flex-start',
+  },
   modalOverlay: {
     position: 'absolute',
     top: 0,

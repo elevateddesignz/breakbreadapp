@@ -8,20 +8,20 @@ import {
   TextInput,
   ActivityIndicator,
   Keyboard,
-  Platform,
 } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Text } from '@/components/ui/Text';
 import { Card } from '@/components/ui/Card';
 import { OrderCard } from '@/components/OrderCard';
 import { SPACING } from '@/constants/Theme';
-import Colors from '@/constants/Colors';
 import useColorScheme from '@/hooks/useColorScheme';
+import Colors from '@/constants/Colors';
 import { upcomingOrders } from '@/constants/UpcomingOrders';
-import { Search, Plus, Bell, Users as UsersIcon, XCircle } from 'lucide-react-native';
+import { Search, Plus, Users as UsersIcon, XCircle } from 'lucide-react-native';
 import { Button } from '@/components/ui/Button';
 import { router } from 'expo-router';
 import * as Location from 'expo-location';
+import { supabase } from '@/lib/supabase';
 
 const API_KEY = process.env.EXPO_PUBLIC_GOOGLE_PLACES_KEY;
 
@@ -30,7 +30,6 @@ export default function RestaurantListScreen() {
   const colors = Colors[colorScheme];
   const insets = useSafeAreaInsets();
 
-  // State for search and restaurants
   const [searchActive, setSearchActive] = useState(false);
   const [query, setQuery] = useState('');
   const [restaurants, setRestaurants] = useState<any[]>([]);
@@ -38,9 +37,12 @@ export default function RestaurantListScreen() {
   const [error, setError] = useState<string | null>(null);
   const [coords, setCoords] = useState<{ latitude: number; longitude: number } | null>(null);
 
+  const [profile, setProfile] = useState<any>(null);
+  const [profileLoading, setProfileLoading] = useState(true);
+
   const searchTimeout = useRef<NodeJS.Timeout | null>(null);
 
-  // Get user location on mount
+  // Location
   useEffect(() => {
     (async () => {
       try {
@@ -57,23 +59,62 @@ export default function RestaurantListScreen() {
     })();
   }, []);
 
-  // API search, debounced
+  // Profile from Supabase PROFILES table ONLY, fallback to auth user_metadata
+  useEffect(() => {
+    (async () => {
+      setProfileLoading(true);
+
+      // Get current user
+      const { data: userData, error: userError } = await supabase.auth.getUser();
+      if (userError || !userData?.user) {
+        setProfile(null);
+        setProfileLoading(false);
+        return;
+      }
+      const userId = userData.user.id;
+
+      // Get profile row
+      const { data: profileData } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .maybeSingle();
+
+      let resultProfile = null;
+      if (profileData) {
+        resultProfile = {
+          id: userId,
+          full_name: profileData.full_name || null,
+          username: profileData.username || null,
+          avatar_url: profileData.avatar_url || null,
+        };
+      } else {
+        resultProfile = {
+          id: userId,
+          full_name: userData.user.user_metadata?.full_name || null,
+          username: userData.user.user_metadata?.username || null,
+          avatar_url: userData.user.user_metadata?.avatar_url || null,
+        };
+      }
+      setProfile(resultProfile);
+      setProfileLoading(false);
+    })();
+  }, []);
+
+  // Google search, debounced
   useEffect(() => {
     if (!coords) return;
     setLoading(true);
     setError(null);
-
     if (searchTimeout.current) clearTimeout(searchTimeout.current);
 
     searchTimeout.current = setTimeout(async () => {
       try {
         let url = '';
         if (query.trim()) {
-          // Text search
           const q = encodeURIComponent(query.trim());
           url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${q}&location=${coords.latitude},${coords.longitude}&radius=2000&type=restaurant&key=${API_KEY}`;
         } else {
-          // Nearby search
           url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${coords.latitude},${coords.longitude}&radius=2000&type=restaurant&key=${API_KEY}`;
         }
         const res = await fetch(url);
@@ -88,7 +129,7 @@ export default function RestaurantListScreen() {
         setError('Failed to load restaurants.');
       }
       setLoading(false);
-    }, 500);
+    }, 350);
 
     return () => {
       if (searchTimeout.current) clearTimeout(searchTimeout.current);
@@ -125,7 +166,6 @@ export default function RestaurantListScreen() {
     return 'https://via.placeholder.com/400x150.png?text=No+Image';
   }
 
-  // Handle search submit (closes keyboard)
   const handleSearchSubmit = () => {
     if (query.trim().length > 0) {
       router.push({
@@ -137,35 +177,42 @@ export default function RestaurantListScreen() {
     }
   };
 
+  // --------- UI ---------
   return (
-    <View style={[styles.container, { backgroundColor: colors.background }]}>
-      {/* Header */}
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
+      {/* Header: Avatar and Name */}
       <View style={styles.header}>
-        <View>
-          <Text variant="body-sm" color={colors.muted}>
-            Good afternoon
-          </Text>
-          <Text variant="h3" weight="bold">
-            Jamie Smith
-          </Text>
-        </View>
-        <View style={styles.headerActions}>
-          <TouchableOpacity style={styles.iconButton}>
-            <Bell size={24} color={colors.text} />
-            <View
-              style={[
-                styles.notificationBadge,
-                { backgroundColor: colors.notification }
-              ]}
-            />
-          </TouchableOpacity>
-          <TouchableOpacity>
-            <Image
-              source={{ uri: 'https://images.pexels.com/photos/614810/pexels-photo-614810.jpeg' }}
-              style={styles.avatar}
-            />
-          </TouchableOpacity>
-        </View>
+        {profileLoading ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <View style={[styles.avatar, { backgroundColor: colors.muted, alignItems: 'center', justifyContent: 'center' }]}>
+              <ActivityIndicator color={colors.tint} />
+            </View>
+            <View style={{ width: 10 }} />
+            <Text variant="h3" weight="bold" style={{ color: colors.text }}>
+              ...
+            </Text>
+          </View>
+        ) : (
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            {profile?.avatar_url ? (
+              <Image
+                source={{ uri: profile.avatar_url }}
+                style={styles.avatar}
+                onError={() => setProfile((prev: any) => ({ ...prev, avatar_url: null }))}
+              />
+            ) : (
+              <View style={[styles.avatar, { backgroundColor: colors.muted, alignItems: 'center', justifyContent: 'center' }]}>
+                <Text variant="h3" style={{ color: colors.text }}>
+                  {(profile?.full_name?.[0] || profile?.username?.[0] || '?').toUpperCase()}
+                </Text>
+              </View>
+            )}
+            <View style={{ width: 10 }} />
+            <Text variant="h3" weight="bold" style={{ color: colors.text }}>
+              {profile?.full_name?.trim() || profile?.username || 'No Name Set'}
+            </Text>
+          </View>
+        )}
       </View>
 
       {/* Search Bar */}
@@ -196,10 +243,7 @@ export default function RestaurantListScreen() {
       {/* Main Content */}
       <ScrollView
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={[
-          styles.scrollContent,
-          { paddingBottom: insets.bottom + SPACING.lg }
-        ]}
+        contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
       >
         {/* Upcoming Orders */}
@@ -251,8 +295,9 @@ export default function RestaurantListScreen() {
             </Text>
             <TouchableOpacity
               onPress={() => {
+                // "See All" goes to full restaurant list page, passing current query if any
                 router.push({
-                  pathname: '/(tabs)/restaurants/index.tsx',
+                  pathname: '/(tabs)/restaurants/index',
                   params: query ? { query } : {},
                 });
               }}
@@ -284,6 +329,7 @@ export default function RestaurantListScreen() {
                     key={getId(restaurant)}
                     style={styles.restaurantCard}
                     onPress={() => {
+                      // Each restaurant opens its own details page, pass JSON as param
                       router.push({
                         pathname: `/restaurants/${getId(restaurant)}`,
                         params: {
@@ -367,52 +413,41 @@ export default function RestaurantListScreen() {
           </View>
         </View>
       </ScrollView>
-    </View>
+    </SafeAreaView>
   );
 }
 
+// --------- Styles ---------
 const styles = StyleSheet.create({
   container: {
     flex: 1,
   },
   header: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: SPACING.lg,
-    paddingTop: SPACING.xl,
-    paddingBottom: SPACING.md,
-  },
-  headerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  iconButton: {
-    marginRight: SPACING.md,
-    position: 'relative',
-  },
-  notificationBadge: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    position: 'absolute',
-    top: 0,
-    right: 0,
+    paddingTop: 6,
+    paddingBottom: 8,
+    minHeight: 52,
   },
   avatar: {
     width: 40,
     height: 40,
     borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: "#e2e2e2",
   },
   searchContainer: {
     paddingHorizontal: SPACING.lg,
-    marginBottom: SPACING.md,
+    marginBottom: 8,
+    marginTop: 4,
   },
   searchBar: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: SPACING.md,
-    paddingVertical: SPACING.sm,
+    paddingVertical: 6,
     borderRadius: 8,
     borderWidth: 1,
   },
@@ -422,40 +457,38 @@ const styles = StyleSheet.create({
     minHeight: 40,
     paddingVertical: 0,
   },
-  searchText: {
-    marginLeft: SPACING.sm,
-  },
   scrollContent: {
     paddingHorizontal: SPACING.lg,
+    paddingBottom: 12,
   },
   upcomingOrdersContainer: {
-    marginBottom: SPACING.lg,
+    marginBottom: 16,
   },
   sectionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: SPACING.md,
+    marginBottom: 8,
   },
   sectionTitle: {
-    marginBottom: SPACING.md,
+    marginBottom: 8,
   },
   emptyStateCard: {
     alignItems: 'center',
-    paddingVertical: SPACING.lg,
+    paddingVertical: 24,
   },
   createButton: {
-    marginTop: SPACING.md,
+    marginTop: 12,
   },
   suggestedRestaurantsContainer: {
-    marginBottom: SPACING.lg,
+    marginBottom: 16,
   },
   restaurantsScrollContent: {
-    paddingRight: SPACING.md,
+    paddingRight: 8,
   },
   restaurantCard: {
     width: 160,
-    marginRight: SPACING.md,
+    marginRight: 8,
     borderRadius: 8,
     overflow: 'hidden',
   },
@@ -465,10 +498,10 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   restaurantInfo: {
-    marginTop: SPACING.xs,
+    marginTop: 4,
   },
   quickActionsContainer: {
-    marginBottom: SPACING.lg,
+    marginBottom: 12,
   },
   actionsRow: {
     flexDirection: 'row',
@@ -476,12 +509,12 @@ const styles = StyleSheet.create({
   },
   actionButton: {
     width: '48%',
-    padding: SPACING.md,
+    padding: 12,
     borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
   },
   actionText: {
-    marginTop: SPACING.xs,
+    marginTop: 4,
   },
 });

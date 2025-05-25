@@ -1,45 +1,48 @@
 import React, { useEffect, useState } from 'react';
 import {
-  StyleSheet, View, TouchableOpacity, ScrollView, Image, Switch, ActivityIndicator, Alert, Modal, TextInput
+  StyleSheet, View, TouchableOpacity, ScrollView, Image, ActivityIndicator, Alert, Modal, TextInput
 } from 'react-native';
 import { Text } from '@/components/ui/Text';
 import { Card } from '@/components/ui/Card';
 import { SPACING, RADIUS } from '@/constants/Theme';
-import Colors from '@/constants/Colors';
+import Colors from '@/constants/Colors'; // GLOBAL COLORS!
 import useColorScheme from '@/hooks/useColorScheme';
-import {
-  User, CreditCard, Bell, MessageSquare, Heart, CircleHelp as HelpCircle, ChevronRight, Settings, LogOut, Edit
-} from 'lucide-react-native';
+import { Edit, Settings, LogOut } from 'lucide-react-native';
 import { supabase } from '@/lib/supabase';
+import { router } from 'expo-router';
+import * as ImagePicker from 'expo-image-picker';
+import { decode } from 'base64-arraybuffer';
 
 export default function ProfileScreen() {
   const colorScheme = useColorScheme();
   const colors = Colors[colorScheme];
-  const [notifications, setNotifications] = React.useState(true);
 
-  // 👇 Profile/user state
+  // Profile/user state
   const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [editFullName, setEditFullName] = useState('');
-  const [editAvatar, setEditAvatar] = useState('');
   const [saving, setSaving] = useState(false);
 
-  // Fetch profile on mount
+  // Tables created count (from 'tables')
+  const [tablesCreated, setTablesCreated] = useState(0);
+
   useEffect(() => {
+    let mounted = true;
     (async () => {
       setLoading(true);
       setError(null);
 
+      // 1. Get user from auth
       const { data: { user }, error: userError } = await supabase.auth.getUser();
-
       if (userError || !user) {
         setError('User not logged in');
         setLoading(false);
         return;
       }
 
+      // 2. Get profile info
       const { data, error: profileError } = await supabase
         .from('profiles')
         .select('*')
@@ -52,18 +55,32 @@ export default function ProfileScreen() {
         return;
       }
 
-      setProfile({
-        ...data,
-        email: user.email, // fallback to Auth email
-      });
-      setLoading(false);
+      // 3. Get tables created by user (MUST MATCH GROUP PAGE)
+      const { count, error: tablesError } = await supabase
+        .from('tables') // <--- YOUR MAIN TABLE
+        .select('id', { count: 'exact', head: true })
+        .eq('creator_id', user.id);
+
+      if (tablesError) {
+        setTablesCreated(0);
+      } else {
+        setTablesCreated(count || 0);
+      }
+
+      if (mounted) {
+        setProfile({
+          ...data,
+          email: user.email,
+        });
+        setLoading(false);
+      }
     })();
+    return () => { mounted = false; };
   }, []);
 
-  // Open edit modal and fill with current info
+  // Open edit modal
   const openEditModal = () => {
     setEditFullName(profile?.full_name || '');
-    setEditAvatar(profile?.avatar_url || '');
     setEditing(true);
   };
 
@@ -74,9 +91,10 @@ export default function ProfileScreen() {
       return;
     }
     setSaving(true);
+
     const { error } = await supabase
       .from('profiles')
-      .update({ full_name: editFullName, avatar_url: editAvatar })
+      .update({ full_name: editFullName })
       .eq('id', profile.id);
 
     setSaving(false);
@@ -86,19 +104,72 @@ export default function ProfileScreen() {
       return;
     }
 
-    setProfile({ ...profile, full_name: editFullName, avatar_url: editAvatar });
+    setProfile({ ...profile, full_name: editFullName });
     setEditing(false);
     Alert.alert('Success', 'Profile updated!');
   };
 
-  // Logout handler
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
-    Alert.alert('Logged Out', 'You have been logged out.');
-    // You may want to navigate to login here!
+  // --- AVATAR UPLOAD LOGIC ---
+  const handlePickAvatar = async () => {
+    const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permissionResult.granted) {
+      Alert.alert("Permission required", "Please grant permission to access photos.");
+      return;
+    }
+
+    const pickerResult = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      quality: 0.7,
+      base64: true,
+    });
+
+    if (pickerResult.canceled || !pickerResult.assets?.length) return;
+    const { uri, base64 } = pickerResult.assets[0];
+    if (!uri || !base64) return;
+
+    const filename = `${profile.id}-${Date.now()}.jpg`;
+
+    const { error: uploadError } = await supabase
+      .storage
+      .from('avatars')
+      .upload(filename, decode(base64), {
+        contentType: 'image/jpeg',
+        upsert: true,
+      });
+
+    if (uploadError) {
+      Alert.alert('Upload failed', uploadError.message);
+      return;
+    }
+
+    const { data } = supabase
+      .storage
+      .from('avatars')
+      .getPublicUrl(filename);
+
+    const publicUrl = data?.publicUrl;
+
+    const { error: updateError } = await supabase
+      .from('profiles')
+      .update({ avatar_url: publicUrl })
+      .eq('id', profile.id);
+
+    if (updateError) {
+      Alert.alert('Profile update failed', updateError.message);
+      return;
+    }
+
+    setProfile({ ...profile, avatar_url: publicUrl });
+    Alert.alert('Success', 'Avatar updated!');
   };
 
-  // Render
+  // Logout handler (with router)
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.replace('/(auth)/login');
+  };
+
   if (loading) {
     return (
       <View style={[styles.centered, { backgroundColor: colors.background }]}>
@@ -136,14 +207,6 @@ export default function ProfileScreen() {
               onChangeText={setEditFullName}
               style={[styles.input, { color: colors.text, borderColor: colors.border }]}
               placeholder="Full Name"
-              placeholderTextColor={colors.muted}
-            />
-            <Text variant="body" style={{ marginTop: 10 }}>Avatar URL</Text>
-            <TextInput
-              value={editAvatar}
-              onChangeText={setEditAvatar}
-              style={[styles.input, { color: colors.text, borderColor: colors.border }]}
-              placeholder="Avatar URL"
               placeholderTextColor={colors.muted}
             />
             <View style={{ flexDirection: 'row', marginTop: 24 }}>
@@ -184,10 +247,15 @@ export default function ProfileScreen() {
         contentContainerStyle={styles.scrollContent}
       >
         <View style={styles.profileHeader}>
-          <Image
-            source={{ uri: profile?.avatar_url || 'https://ui-avatars.com/api/?name=' + encodeURIComponent(profile?.full_name || profile?.email || 'User') }}
-            style={styles.profileImage}
-          />
+          <TouchableOpacity onPress={handlePickAvatar} style={{ position: 'relative' }}>
+            <Image
+              source={{ uri: profile?.avatar_url || 'https://ui-avatars.com/api/?name=' + encodeURIComponent(profile?.full_name || profile?.email || 'User') }}
+              style={styles.profileImage}
+            />
+            <View style={styles.editAvatarBadge}>
+              <Edit size={18} color="#fff" />
+            </View>
+          </TouchableOpacity>
           <View style={styles.profileInfo}>
             <Text variant="h3" weight="bold">
               {profile?.full_name || 'No Name'}
@@ -208,7 +276,7 @@ export default function ProfileScreen() {
             </TouchableOpacity>
           </View>
         </View>
-        {/* ...Rest of your UI, stats, menu, etc. unchanged... */}
+        {/* --- Stats Card --- */}
         <Card style={styles.statsCard}>
           <View style={styles.statsRow}>
             <View style={styles.statItem}>
@@ -222,10 +290,10 @@ export default function ProfileScreen() {
             <View style={[styles.statDivider, { backgroundColor: colors.border }]} />
             <View style={styles.statItem}>
               <Text variant="h3" weight="bold" color={colors.tint}>
-                {profile?.reward_points ?? 0}
+                {tablesCreated}
               </Text>
               <Text variant="body-sm" color={colors.muted}>
-                Reward Points
+                Tables Created
               </Text>
             </View>
             <View style={[styles.statDivider, { backgroundColor: colors.border }]} />
@@ -234,12 +302,11 @@ export default function ProfileScreen() {
                 {profile?.active_groups ?? 0}
               </Text>
               <Text variant="body-sm" color={colors.muted}>
-                Active Groups
+                Active Tables
               </Text>
             </View>
           </View>
         </Card>
-        {/* ...other menu/settings sections (unchanged)... */}
         <TouchableOpacity
           style={[
             styles.logoutButton,
@@ -294,5 +361,13 @@ const styles = StyleSheet.create({
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.25)', justifyContent: 'center', alignItems: 'center' },
   modalContent: { width: '90%', borderRadius: RADIUS.lg, padding: 24, alignItems: 'stretch' },
   input: { borderWidth: 1, borderRadius: RADIUS.md, paddingHorizontal: 16, paddingVertical: 10, fontSize: 16, marginTop: 6 },
-  modalBtn: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 12, borderRadius: RADIUS.md }
+  modalBtn: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 12, borderRadius: RADIUS.md },
+  editAvatarBadge: {
+    position: 'absolute',
+    right: 2,
+    bottom: 2,
+    backgroundColor: '#333',
+    borderRadius: 14,
+    padding: 4,
+  },
 });
