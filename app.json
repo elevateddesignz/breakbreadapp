@@ -14,6 +14,9 @@
         "NSLocationWhenInUseUsageDescription": "We need your location to show nearby restaurants."
       }
     },
+    "android": {
+      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]
+    },
     "web": {
       "bundler": "metro",
       "output": "single",
@@ -22,9 +25,10 @@
     "plugins": ["expo-router", "expo-font", "expo-web-browser"],
     "experiments": {
       "typedRoutes": true
-    }
     },
-    "android": {
-      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]
+    "extra": {
+      "EXPO_PUBLIC_SUPABASE_URL": "YOUR_SUPABASE_URL_HERE",
+      "EXPO_PUBLIC_SUPABASE_ANON_KEY": "YOUR_SUPABASE_ANON_KEY_HERE"
+    }
   }
 }
