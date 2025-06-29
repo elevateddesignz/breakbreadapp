@@ -1,4 +1,4 @@
-import React, { createContext, useState, useEffect, useContext, ReactNode } from 'react';
+import React, { createContext, useState, useEffect, useContext, ReactNode, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient, Session, User } from '@supabase/supabase-js';
 
@@ -22,31 +22,48 @@ const AuthContext = createContext<AuthContextProps | undefined>(undefined);
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loadingSession, setLoadingSession] = useState(true);
+  const mountedRef = useRef(true);
 
   // Restore session on mount
   useEffect(() => {
+    mountedRef.current = true;
+
     (async () => {
-      const json = await AsyncStorage.getItem('@sb_session');
-      if (json) {
-        const session: Session = JSON.parse(json);
-        supabase.auth.setSession(session); // set in Supabase
-        setUser(session.user);
+      try {
+        const json = await AsyncStorage.getItem('@sb_session');
+        if (json && mountedRef.current) {
+          const session: Session = JSON.parse(json);
+          supabase.auth.setSession(session); // set in Supabase
+          setUser(session.user);
+        }
+      } catch (error) {
+        console.error('Error restoring session:', error);
+      } finally {
+        if (mountedRef.current) {
+          setLoadingSession(false);
+        }
       }
-      setLoadingSession(false);
     })();
 
     // Subscribe to auth state changes
     const { data: listener } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (session) {
-        setUser(session.user);
-        await AsyncStorage.setItem('@sb_session', JSON.stringify(session));
-      } else {
-        setUser(null);
-        await AsyncStorage.removeItem('@sb_session');
+      if (!mountedRef.current) return;
+
+      try {
+        if (session) {
+          setUser(session.user);
+          await AsyncStorage.setItem('@sb_session', JSON.stringify(session));
+        } else {
+          setUser(null);
+          await AsyncStorage.removeItem('@sb_session');
+        }
+      } catch (error) {
+        console.error('Error handling auth state change:', error);
       }
     });
 
     return () => {
+      mountedRef.current = false;
       listener.subscription.unsubscribe();
     };
   }, []);
